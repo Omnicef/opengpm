@@ -1,5 +1,5 @@
 GO       ?= go
-LINT     ?= golangci-lint
+LINTBIN  ?= golangci-lint
 PACKAGES := $(shell $(GO) list ./... 2>/dev/null)
 
 .PHONY: lint test
@@ -9,7 +9,7 @@ ifeq ($(PACKAGES),)
 	@echo "no Go packages yet; lint skipped"
 else
 	$(GO) vet ./...
-	$(LINT) run
+	$(LINTBIN) run
 	@test "$$(gofmt -l .)" = ""
 endif
 
