@@ -1,0 +1,14 @@
+{
+  "comment": "Priority and weight identical (weight 0 is common on Samba AD). Hostname breaks the tie so DC pinning is stable.",
+  "domain": "corp.example.com",
+  "answer": [
+    {"target": "dc-charlie.corp.example.com.", "port": 389, "priority": 0, "weight": 0},
+    {"target": "dc-alpha.corp.example.com.", "port": 389, "priority": 0, "weight": 0},
+    {"target": "dc-bravo.corp.example.com.", "port": 389, "priority": 0, "weight": 0}
+  ],
+  "want": [
+    {"host": "dc-alpha.corp.example.com", "port": 389, "priority": 0, "weight": 0},
+    {"host": "dc-bravo.corp.example.com", "port": 389, "priority": 0, "weight": 0},
+    {"host": "dc-charlie.corp.example.com", "port": 389, "priority": 0, "weight": 0}
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "comment": "Distinct priorities, answered out of order. Lowest priority wins.",
+  "domain": "corp.example.com",
+  "answer": [
+    {"target": "dc-slow.corp.example.com.", "port": 389, "priority": 30, "weight": 100},
+    {"target": "dc-main.corp.example.com.", "port": 389, "priority": 10, "weight": 100},
+    {"target": "dc-backup.corp.example.com.", "port": 389, "priority": 20, "weight": 100}
+  ],
+  "want": [
+    {"host": "dc-main.corp.example.com", "port": 389, "priority": 10, "weight": 100},
+    {"host": "dc-backup.corp.example.com", "port": 389, "priority": 20, "weight": 100},
+    {"host": "dc-slow.corp.example.com", "port": 389, "priority": 30, "weight": 100}
+  ]
+}

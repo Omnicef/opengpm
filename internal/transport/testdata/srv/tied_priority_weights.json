@@ -1,0 +1,14 @@
+{
+  "comment": "One priority band, differing weights. Heaviest first, no randomisation.",
+  "domain": "corp.example.com",
+  "answer": [
+    {"target": "dc-light.corp.example.com.", "port": 389, "priority": 10, "weight": 10},
+    {"target": "dc-heavy.corp.example.com.", "port": 389, "priority": 10, "weight": 200},
+    {"target": "dc-mid.corp.example.com.", "port": 389, "priority": 10, "weight": 50}
+  ],
+  "want": [
+    {"host": "dc-heavy.corp.example.com", "port": 389, "priority": 10, "weight": 200},
+    {"host": "dc-mid.corp.example.com", "port": 389, "priority": 10, "weight": 50},
+    {"host": "dc-light.corp.example.com", "port": 389, "priority": 10, "weight": 10}
+  ]
+}
