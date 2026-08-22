@@ -9,8 +9,19 @@ package krb
 
 import (
 	"errors"
+	"fmt"
+	"math"
+	"net"
+	"os"
+	"regexp"
+	"strconv"
+	"strings"
 
 	"github.com/jcmturner/gokrb5/v8/client"
+	"github.com/jcmturner/gokrb5/v8/config"
+	"github.com/jcmturner/gokrb5/v8/iana/errorcode"
+	"github.com/jcmturner/gokrb5/v8/keytab"
+	"github.com/jcmturner/gokrb5/v8/krberror"
 )
 
 // The failure modes an operator must be able to tell apart on first run.
@@ -47,9 +58,22 @@ var (
 	ErrStaleKVNO = errors.New("krb: the keytab's KVNO label does not match the key version the KDC issued; re-export the keytab from the DC, or relabel its entries with the KDC's KVNO")
 )
 
-// errNotImplemented marks the contract stubs. The implementation session
-// (T-01) removes it; the unit tests are expected to fail against it.
-var errNotImplemented = errors.New("krb: not implemented")
+// KDC refusals whose error code names the knob to turn. gokrb5 renders the
+// code through errorcode.Lookup whether the KRBError reaches us typed or
+// already flattened into a Krberror's text, so matching that rendering
+// covers both shapes without depending on errors.As reaching through a
+// wrapper that has no Unwrap.
+var kdcCodes = map[int32]error{
+	errorcode.KRB_AP_ERR_SKEW:          ErrClockSkew,
+	errorcode.KRB_AP_ERR_BADKEYVER:     ErrStaleKVNO,
+	errorcode.KDC_ERR_PREAUTH_FAILED:   ErrBadKey,
+	errorcode.KRB_AP_ERR_BAD_INTEGRITY: ErrBadKey,
+}
+
+// keytabMiss is keytab.Keytab.GetEncryptionKey's miss text. The KVNO it
+// reports is the one the KDC put in the AS_REP's EncPart, i.e. the live key
+// version, which is what the retry relabels the keytab entries to.
+var keytabMiss = regexp.MustCompile(`matching key not found in keytab.*kvno: (\d+)`)
 
 // Client is an authenticated Kerberos context sourced from a keytab.
 type Client struct {
@@ -68,7 +92,52 @@ type Client struct {
 // satisfies errors.Is against one of this package's sentinels where the
 // cause is recognised.
 func FromKeytab(path, principal, realm string) (*Client, error) {
-	return nil, errNotImplemented
+	kt, err := keytab.Load(path)
+	if err != nil {
+		return nil, fmt.Errorf("krb: reading the keytab at %s: %w", path, err)
+	}
+	confPath := os.Getenv("KRB5_CONFIG")
+	if confPath == "" {
+		confPath = "/etc/krb5.conf"
+	}
+	conf, err := config.Load(confPath)
+	if err != nil {
+		return nil, fmt.Errorf("krb: reading the Kerberos configuration at %s (set KRB5_CONFIG to point elsewhere): %w", confPath, err)
+	}
+
+	// The keytab and the caller may both spell the principal with its realm;
+	// gokrb5 wants the bare name and the realm separately.
+	name, _, _ := strings.Cut(principal, "@")
+
+	// DisablePAFXFAST because Active Directory does not answer gokrb5's
+	// PA_REQ_ENC_PA_REP, and its silence fails AS_REP verification as
+	// "KDC did not respond appropriately to FAST negotiation" — another
+	// misleading first-run error. Encrypted-timestamp pre-authentication is
+	// unaffected; only the encrypted-PA-REP negotiation is dropped.
+	//
+	// Login establishes the TGT session, and gokrb5's addSession starts the
+	// goroutine that refreshes it at five sixths of its lifetime, so a
+	// long-lived Client keeps a live TGT with nothing further from us.
+	cl := client.NewWithKeytab(name, realm, kt, conf, client.DisablePAFXFAST(true))
+	err = cl.Login()
+
+	// SPIKE-T00's defect: the key material is current but the keytab's KVNO
+	// label is behind the KDC, and gokrb5 matches entries by KVNO exactly.
+	// Relabel to the version the KDC just used and try once more. Keys and
+	// etypes are untouched, so this cannot turn a wrong key into a login.
+	if kvno, ok := kdcKVNO(err); ok {
+		for i := range kt.Entries {
+			kt.Entries[i].KVNO = uint32(kvno)
+			if kvno <= math.MaxUint8 {
+				kt.Entries[i].KVNO8 = uint8(kvno)
+			}
+		}
+		err = cl.Login()
+	}
+	if err != nil {
+		return nil, classify(err)
+	}
+	return &Client{gss: cl}, nil
 }
 
 // GSSAPIClient returns the underlying gokrb5 client that the LDAP bind
@@ -92,12 +161,62 @@ func (c *Client) GSSAPIClient() *client.Client {
 // (messages.KRBError, krberror.Krberror, net.Error) and their rendered
 // strings.
 func classify(err error) error {
-	return errNotImplemented
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+
+	// The KDC answered and refused, and said why.
+	for code, sentinel := range kdcCodes {
+		if strings.Contains(msg, errorcode.Lookup(code)) {
+			return fmt.Errorf("%w [%v]", sentinel, err)
+		}
+	}
+
+	switch {
+	// The keytab held no entry for the key version the KDC used. Reaching
+	// classify means the relabelled retry did not fix it either.
+	case keytabMiss.MatchString(msg):
+		return fmt.Errorf("%w [%v]", ErrStaleKVNO, err)
+
+	// No entry at all for the principal or etype asked for, rather than a
+	// version mismatch — the keytab is for the wrong account.
+	case strings.Contains(msg, "matching key not found in keytab"):
+		return fmt.Errorf("%w [%v]", ErrBadKey, err)
+
+	// The entry was found and its key did not decrypt the AS_REP.
+	case strings.Contains(msg, "integrity verification failed"):
+		return fmt.Errorf("%w [%v]", ErrBadKey, err)
+
+	case isNetworkError(err) || strings.Contains(msg, krberror.NetworkingError):
+		return fmt.Errorf("%w [%v]", ErrKDCUnreachable, err)
+	}
+
+	// Naming the wrong knob is worse than naming none.
+	return fmt.Errorf("krb: Kerberos login failed for a reason this package does not recognise, so it has no remediation to offer: %w", err)
+}
+
+func isNetworkError(err error) bool {
+	var nerr net.Error
+	return errors.As(err, &nerr)
 }
 
 // kdcKVNO reports the key version number the KDC used, recovered from a
 // decrypt failure, so FromKeytab can relabel the keytab entry for its
 // single retry. ok is false when err carries no KVNO.
 func kdcKVNO(err error) (kvno int, ok bool) {
-	return 0, false
+	if err == nil {
+		return 0, false
+	}
+	m := keytabMiss.FindStringSubmatch(err.Error())
+	if m == nil {
+		return 0, false
+	}
+	kvno, cerr := strconv.Atoi(m[1])
+	// GetEncryptionKey treats a zero KVNO as "any version", so a miss at
+	// zero is not a stale label and relabelling to it would match nothing.
+	if cerr != nil || kvno == 0 {
+		return 0, false
+	}
+	return kvno, true
 }
