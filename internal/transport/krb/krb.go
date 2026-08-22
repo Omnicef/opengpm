@@ -125,7 +125,11 @@ func FromKeytab(path, principal, realm string) (*Client, error) {
 	// label is behind the KDC, and gokrb5 matches entries by KVNO exactly.
 	// Relabel to the version the KDC just used and try once more. Keys and
 	// etypes are untouched, so this cannot turn a wrong key into a login.
-	if kvno, ok := kdcKVNO(err); ok {
+	//
+	// The bounds restate what kdcKVNO already guarantees; they are here so
+	// the conversions below are provably in range at the point of use rather
+	// than one function away, which is the only form gosec G115 accepts.
+	if kvno, ok := kdcKVNO(err); ok && kvno > 0 && int64(kvno) <= math.MaxUint32 {
 		for i := range kt.Entries {
 			kt.Entries[i].KVNO = uint32(kvno)
 			if kvno <= math.MaxUint8 {
@@ -203,7 +207,8 @@ func isNetworkError(err error) bool {
 
 // kdcKVNO reports the key version number the KDC used, recovered from a
 // decrypt failure, so FromKeytab can relabel the keytab entry for its
-// single retry. ok is false when err carries no KVNO.
+// single retry. ok is false when err carries no KVNO, or carries one the
+// keytab's uint32 KVNO field cannot hold.
 func kdcKVNO(err error) (kvno int, ok bool) {
 	if err == nil {
 		return 0, false
@@ -212,11 +217,14 @@ func kdcKVNO(err error) (kvno int, ok bool) {
 	if m == nil {
 		return 0, false
 	}
-	kvno, cerr := strconv.Atoi(m[1])
+	// ParseUint's 32-bit size rejects an arbitrarily long digit run rather
+	// than letting it truncate silently into the keytab's uint32 KVNO.
+	//
 	// GetEncryptionKey treats a zero KVNO as "any version", so a miss at
 	// zero is not a stale label and relabelling to it would match nothing.
-	if cerr != nil || kvno == 0 {
+	v, cerr := strconv.ParseUint(m[1], 10, 32)
+	if cerr != nil || v == 0 {
 		return 0, false
 	}
-	return kvno, true
+	return int(v), true
 }
