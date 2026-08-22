@@ -3,8 +3,8 @@
 package fstest
 
 import (
-	"errors"
 	"io/fs"
+	stdfstest "testing/fstest"
 )
 
 // GPTFS builds an in-memory fs.FS representing a GPT directory tree from
@@ -14,7 +14,11 @@ import (
 //
 // An empty or nil map yields a valid, empty FS rather than an error.
 func GPTFS(files map[string][]byte) fs.FS {
-	return unimplementedFS{}
+	m := stdfstest.MapFS{}
+	for p, data := range files {
+		m[p] = &stdfstest.MapFile{Data: data}
+	}
+	return m
 }
 
 // FaultFS wraps an fs.FS, returning the configured error for exactly the
@@ -24,13 +28,17 @@ func GPTFS(files map[string][]byte) fs.FS {
 // Faulting a directory is how tests reach the "SYSVOL denied us a subtree"
 // case that a real read-only service account hits often.
 func FaultFS(inner fs.FS, faults map[string]error) fs.FS {
-	return unimplementedFS{}
+	return faultFS{inner: inner, faults: faults}
 }
 
-// unimplementedFS keeps the stubs honest: tests fail with an error instead of
-// a nil-FS panic until T-04 is implemented.
-type unimplementedFS struct{}
+type faultFS struct {
+	inner  fs.FS
+	faults map[string]error
+}
 
-func (unimplementedFS) Open(name string) (fs.File, error) {
-	return nil, &fs.PathError{Op: "open", Path: name, Err: errors.New("fstest: not implemented")}
+func (f faultFS) Open(name string) (fs.File, error) {
+	if err, ok := f.faults[name]; ok {
+		return nil, err
+	}
+	return f.inner.Open(name)
 }
