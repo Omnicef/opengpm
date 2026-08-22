@@ -30,6 +30,17 @@ KDC-issued KVNO, emit a specific error naming the KVNO mismatch, and
 cover it in the V-03 failure-mode matrix. Same defect would hit the
 D-01 LDAP bind — it is a Kerberos-client issue, not SMB.
 
+## PA-FX-FAST lesson (feeds T-01, D-01, and every later login)
+gokrb5 sends PA_REQ_ENC_PA_REP by default. Active Directory does not
+answer it, and gokrb5 renders that silence as "KDC did not respond
+appropriately to FAST negotiation" — a second misleading first-run
+error, in the same family as the KVNO one above: it sends operators
+after a FAST or DNS fault that does not exist. The fix is
+client.DisablePAFXFAST(true); encrypted-timestamp pre-authentication
+is unaffected, only the encrypted-PA-REP negotiation is dropped.
+This applies to EVERY gokrb5 login against AD, not just T-01, so
+D-01's LDAP bind must pass the same option.
+
 ## DC-hardening verification
 Library "signing required" readouts are client||server, so they
 cannot prove the server. A no-login NEGOTIATE showed the server's
