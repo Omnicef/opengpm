@@ -4,7 +4,10 @@ package transport
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
+	"slices"
+	"strings"
 )
 
 // DC is a domain controller candidate discovered from a DNS SRV record.
@@ -38,5 +41,30 @@ var ErrNoDCs = errors.New("transport: no domain controllers in SRV answer")
 // It returns ErrNoDCs for an empty answer, and a wrapped resolver error if
 // the lookup itself failed.
 func DiscoverDCs(ctx context.Context, r Resolver, domain string) ([]DC, error) {
-	return nil, errors.New("not implemented")
+	_, answers, err := r.LookupSRV(ctx, "ldap", "tcp", "dc._msdcs."+domain)
+	if err != nil {
+		return nil, fmt.Errorf("discovering DCs for %s: %w", domain, err)
+	}
+	dcs := make([]DC, 0, len(answers))
+	for _, a := range answers {
+		dcs = append(dcs, DC{
+			Host:     strings.TrimSuffix(a.Target, "."),
+			Port:     a.Port,
+			Priority: a.Priority,
+			Weight:   a.Weight,
+		})
+	}
+	if len(dcs) == 0 {
+		return nil, ErrNoDCs
+	}
+	slices.SortFunc(dcs, func(a, b DC) int {
+		if a.Priority != b.Priority {
+			return int(a.Priority) - int(b.Priority)
+		}
+		if a.Weight != b.Weight {
+			return int(b.Weight) - int(a.Weight)
+		}
+		return strings.Compare(a.Host, b.Host)
+	})
+	return dcs, nil
 }
