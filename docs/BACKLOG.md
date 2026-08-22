@@ -241,14 +241,16 @@ Snapshot-oriented, content-addressed (§3.3). `PutSnapshot(ctx, tenant, domain, 
 
 ### T-00 🔴 SPIKE: SMB over Kerberos from a container
 
+**Status: DONE — verdict GO.** See `docs/SPIKE-T00.md`.
+
 **Files:** `spike/smb/` (throwaway, not merged)
 **Accept:** reads a byte out of `\\dc\SYSVOL\` from a Linux container, authenticated by **Kerberos with NTLM disabled**, against a DC with **SMB signing required** and SMB3 encryption enabled.
 
 **Oracle:** none possible — this is empirical. The acceptance criterion *is* the oracle: bytes come back, or they don't. Agent-writable, but **you must verify the DC is genuinely configured with signing required and NTLM disabled**, or the spike passes for the wrong reason and you discover it in month three. Check the DC's configuration yourself before trusting a green result.
 
-Evaluate in order: [`jfjallid/go-smb`](https://github.com/jfjallid/go-smb) (active mid-2026, SMB3), [`CloudSoda/go-smb2`](https://github.com/CloudSoda/go-smb2), [`hirochachacha/go-smb2`](https://github.com/hirochachacha/go-smb2) (has `Krb5Initiator`, lightly maintained).
+Evaluation outcome: [`CloudSoda/go-smb2`](https://github.com/CloudSoda/go-smb2) — **chosen for T-03** (shares `jcmturner/gokrb5/v8` with the LDAP path, provides `Share.DirFS()` `fs.FS`); [`jfjallid/go-smb`](https://github.com/jfjallid/go-smb) (active mid-2026, SMB3) — passed unmodified, kept as the proven fallback (ships its own gokrb5 fork, no `fs.FS`); [`hirochachacha/go-smb2`](https://github.com/hirochachacha/go-smb2) — **rejected**: has no `Krb5Initiator` (CloudSoda's fork added that), `Initiator` methods are unexported, dead since 2022-07.
 
-**This is a go/no-go gate on the entire Docker architecture.** If all three fail, the fallback is a `cifs` mount in a privileged container — which breaks every container-hardening claim in §5. Know this in week one.
+**Go/no-go gate on the entire Docker architecture — resolved GO.** Pure-Go SMB over Kerberos is proven; the `cifs`-mount fallback in a privileged container (which breaks every container-hardening claim in §5) is not needed.
 
 ### T-01 🔴 Keytab and TGT lifecycle
 
@@ -258,7 +260,7 @@ Evaluate in order: [`jfjallid/go-smb`](https://github.com/jfjallid/go-smb) (acti
 
 **Oracle:** V-03 transport failure-mode suite — a DC deliberately misconfigured in each dimension (skewed clock, expired TGT, wrong SPN, NTLM disabled). The agent must produce a *specific* error for each, not a generic auth failure.
 
-**Gotchas:** the failure modes here are all operational, not logical, which is why the test environment is the oracle. TGT renewal before expiry. **Clock skew detection with a specific error message** (§5): Kerberos dies past ~5 minutes drift and the native error is useless.
+**Gotchas:** the failure modes here are all operational, not logical, which is why the test environment is the oracle. TGT renewal before expiry. **Clock skew detection with a specific error message** (§5): Kerberos dies past ~5 minutes drift and the native error is useless. **Keytab KVNO:** `jcmturner/gokrb5/v8` matches keytab entries by KVNO exactly — a keytab whose KVNO label is stale relative to the KDC fails with a misleading "AS_REP invalid or client key incorrect" even though the key material is current. T-01 owns the retry (once, relabelling to the KDC-issued KVNO) and the specific error naming the KVNO mismatch; V-03 covers it. Same defect would hit the D-01 LDAP bind — it is a Kerberos-client issue, not SMB.
 
 This ticket largely determines whether first-run succeeds, and per `PLAN.md` §11 that's the top adoption risk. Review the *error messages* as carefully as the logic — an agent will happily return `fmt.Errorf("auth failed: %w", err)` and pass every test while guaranteeing you a support queue.
 
