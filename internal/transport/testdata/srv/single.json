@@ -1,0 +1,10 @@
+{
+  "comment": "One record on a non-default port; the port must survive.",
+  "domain": "lab.example.net",
+  "answer": [
+    {"target": "dc01.lab.example.net.", "port": 3268, "priority": 0, "weight": 100}
+  ],
+  "want": [
+    {"host": "dc01.lab.example.net", "port": 3268, "priority": 0, "weight": 100}
+  ]
+}

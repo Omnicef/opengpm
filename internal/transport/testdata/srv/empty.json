@@ -1,0 +1,7 @@
+{
+  "comment": "NOERROR with an empty answer section: the domain resolved, no DCs advertised. Sentinel, not a generic failure.",
+  "domain": "empty.example.org",
+  "answer": [],
+  "want": [],
+  "wantErr": "ErrNoDCs"
+}
