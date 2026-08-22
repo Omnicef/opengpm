@@ -4,7 +4,8 @@
 # Fails if any commit in the PR range (BASE_REF...HEAD) touches protected
 # paths. Rules:
 #   *_test.go        — never, unless the commit message contains [test-authoring]
-#   testdata/        — never (covers testdata/oracle/)
+#   testdata/ (any)  — never, unless the commit message contains [test-authoring]
+#                      (matches testdata/* and */testdata/*)
 #   internal/model/  — never, once the "model-freeze" tag exists
 #   go.mod, go.sum   — never, unless the commit message contains [deps]
 #
@@ -39,8 +40,9 @@ for c in $commits; do
 			[[ "$msg" == *"[test-authoring]"* ]] \
 				|| fail "$c: $f — *_test.go files are off-limits; commit message must contain [test-authoring]"
 			;;
-		testdata/*)
-			fail "$c: $f — testdata/ is off-limits (fixtures are the specification)"
+		testdata/*|*/testdata/*)
+			[[ "$msg" == *"[test-authoring]"* ]] \
+				|| fail "$c: $f — testdata/ is off-limits (fixtures are the specification); commit message must contain [test-authoring]"
 			;;
 		internal/model/*)
 			[ "$frozen" = 1 ] \
