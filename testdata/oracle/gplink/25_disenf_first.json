@@ -1,0 +1,30 @@
+{
+    "case":  "25_disenf_first",
+    "description":  "disabled+enforced link at position 1 of 3",
+    "ouDN":  "OU=25_disenf_first,OU=oracle-gplink,DC=gplab,DC=local",
+    "gPOptions":  null,
+    "rawGPLink":  "[LDAP://cn={9753681b-7017-42af-80a3-78ae80aff572},cn=policies,cn=system,dc=gplab,dc=local;3][LDAP://cn={6477be36-69cc-4186-9358-8ad922c50202},cn=policies,cn=system,dc=gplab,dc=local;0][LDAP://cn={1a045cc9-f93c-4bef-a58c-fea04757401d},cn=policies,cn=system,dc=gplab,dc=local;0]",
+    "reported":  [
+                     {
+                         "DisplayName":  "oracle-gplink-c",
+                         "GpoId":  "1a045cc9-f93c-4bef-a58c-fea04757401d",
+                         "Order":  1,
+                         "Enabled":  true,
+                         "Enforced":  false
+                     },
+                     {
+                         "DisplayName":  "oracle-gplink-b",
+                         "GpoId":  "6477be36-69cc-4186-9358-8ad922c50202",
+                         "Order":  2,
+                         "Enabled":  true,
+                         "Enforced":  false
+                     },
+                     {
+                         "DisplayName":  "oracle-gplink-a",
+                         "GpoId":  "9753681b-7017-42af-80a3-78ae80aff572",
+                         "Order":  3,
+                         "Enabled":  false,
+                         "Enforced":  true
+                     }
+                 ]
+}

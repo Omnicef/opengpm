@@ -1,0 +1,23 @@
+{
+    "case":  "31_dup_0_1",
+    "description":  "same GPO linked twice (plain, then disabled)",
+    "ouDN":  "OU=31_dup_0_1,OU=oracle-gplink,DC=gplab,DC=local",
+    "gPOptions":  null,
+    "rawGPLink":  "[LDAP://cn={9753681b-7017-42af-80a3-78ae80aff572},cn=policies,cn=system,dc=gplab,dc=local;0][LDAP://cn={9753681b-7017-42af-80a3-78ae80aff572},cn=policies,cn=system,dc=gplab,dc=local;1]",
+    "reported":  [
+                     {
+                         "DisplayName":  "oracle-gplink-a",
+                         "GpoId":  "9753681b-7017-42af-80a3-78ae80aff572",
+                         "Order":  1,
+                         "Enabled":  false,
+                         "Enforced":  false
+                     },
+                     {
+                         "DisplayName":  "oracle-gplink-a",
+                         "GpoId":  "9753681b-7017-42af-80a3-78ae80aff572",
+                         "Order":  2,
+                         "Enabled":  true,
+                         "Enforced":  false
+                     }
+                 ]
+}
