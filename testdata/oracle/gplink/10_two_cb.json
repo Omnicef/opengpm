@@ -1,0 +1,23 @@
+{
+    "case":  "10_two_cb",
+    "description":  "two links, c then b",
+    "ouDN":  "OU=10_two_cb,OU=oracle-gplink,DC=gplab,DC=local",
+    "gPOptions":  null,
+    "rawGPLink":  "[LDAP://cn={6477BE36-69CC-4186-9358-8AD922C50202},cn=policies,cn=system,DC=gplab,DC=local;0][LDAP://cn={1A045CC9-F93C-4BEF-A58C-FEA04757401D},cn=policies,cn=system,DC=gplab,DC=local;0]",
+    "reported":  [
+                     {
+                         "DisplayName":  "oracle-gplink-c",
+                         "GpoId":  "1a045cc9-f93c-4bef-a58c-fea04757401d",
+                         "Order":  1,
+                         "Enabled":  true,
+                         "Enforced":  false
+                     },
+                     {
+                         "DisplayName":  "oracle-gplink-b",
+                         "GpoId":  "6477be36-69cc-4186-9358-8ad922c50202",
+                         "Order":  2,
+                         "Enabled":  true,
+                         "Enforced":  false
+                     }
+                 ]
+}

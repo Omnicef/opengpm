@@ -1,0 +1,16 @@
+{
+    "case":  "02_one_link_b",
+    "description":  "one link",
+    "ouDN":  "OU=02_one_link_b,OU=oracle-gplink,DC=gplab,DC=local",
+    "gPOptions":  null,
+    "rawGPLink":  "[LDAP://cn={6477BE36-69CC-4186-9358-8AD922C50202},cn=policies,cn=system,DC=gplab,DC=local;0]",
+    "reported":  [
+                     {
+                         "DisplayName":  "oracle-gplink-b",
+                         "GpoId":  "6477be36-69cc-4186-9358-8ad922c50202",
+                         "Order":  1,
+                         "Enabled":  true,
+                         "Enforced":  false
+                     }
+                 ]
+}
