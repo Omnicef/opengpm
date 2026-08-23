@@ -1,0 +1,16 @@
+{
+    "case":  "03_one_link_c",
+    "description":  "one link",
+    "ouDN":  "OU=03_one_link_c,OU=oracle-gplink,DC=gplab,DC=local",
+    "gPOptions":  null,
+    "rawGPLink":  "[LDAP://cn={1A045CC9-F93C-4BEF-A58C-FEA04757401D},cn=policies,cn=system,DC=gplab,DC=local;0]",
+    "reported":  [
+                     {
+                         "DisplayName":  "oracle-gplink-c",
+                         "GpoId":  "1a045cc9-f93c-4bef-a58c-fea04757401d",
+                         "Order":  1,
+                         "Enabled":  true,
+                         "Enforced":  false
+                     }
+                 ]
+}

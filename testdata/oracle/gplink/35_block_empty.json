@@ -1,0 +1,10 @@
+{
+    "case":  "35_block_empty",
+    "description":  "block inheritance, no links",
+    "ouDN":  "OU=35_block_empty,OU=oracle-gplink,DC=gplab,DC=local",
+    "gPOptions":  1,
+    "rawGPLink":  null,
+    "reported":  [
+
+                 ]
+}
