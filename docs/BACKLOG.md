@@ -323,11 +323,11 @@ Also pin the connection to a **specific DC** (§4.1) — expose the chosen DC so
 **Fixtures:** `testdata/oracle/gplink/` (from O-03)
 **Accept:** `go test ./internal/directory/ -run TestParseGPLink` — all 30+ observed cases
 
-**Gotchas:** The single highest-risk small function in the project (§4.2), and the clearest illustration of why oracles beat reasoning here. First entry in the string = Link Order 1 = **highest** precedence. A widely-copied PFE script says the opposite, so the model's training data probably contains both answers — meaning it may argue confidently for the wrong one.
+**Gotchas:** The single highest-risk small function in the project (§4.2), and the clearest illustration of why oracles beat reasoning here. LAST entry in the string = Link Order 1 = **highest** precedence (reverse the string); confirmed by the O-03 fixtures, which are the authority — if the implementation disagrees with them it is wrong. A widely-copied PFE script says the opposite, so the model's training data probably contains both answers — meaning it may argue confidently for the wrong one.
 
 **Do not let the agent reason about ordering. O-03 recorded what GPMC actually does; the fixtures are the answer.** If the implementation disagrees with the fixtures, the implementation is wrong, full stop.
 
-Also: `gPLinkOptions=3` reports as **disabled**, not enforced. The same GPO may appear **twice** on one SOM — do not dedupe by GUID. Links may reference **other domains**.
+Also: `gPLinkOptions=3` reports as **disabled**, not enforced. gPLinkOptions decode: Enabled = NOT (opt AND 1), Enforced = (opt AND 2). Disabled links (opt 1 or 3) still receive an Order and still appear — they are not dropped (see fixture 21_dis_first). opt 3 reports Enabled=false AND Enforced=true; it is treated as disabled via the Enabled flag, not by discarding enforcement. The same GPO may appear **twice** on one SOM — do not dedupe by GUID. Links may reference **other domains**.
 
 ### D-04 🟢 SOM tree assembly
 
