@@ -14,7 +14,13 @@ package smbx
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
+	"net"
+	"os"
+	"sort"
+	"strings"
+	"sync"
 
 	smb2 "github.com/cloudsoda/go-smb2"
 	"github.com/jcmturner/gokrb5/v8/client"
@@ -37,16 +43,17 @@ var (
 	ErrNoShare = errors.New(`smbx: UNC path names no share; \\<domain> alone identifies no SYSVOL tree`)
 )
 
-// errNotImplemented marks the contract stubs. The implementation session
-// (T-03) removes it; the unit tests are expected to fail against it.
-var errNotImplemented = errors.New("smbx: not implemented")
-
 // negotiator is the only negotiation posture this package uses. Signing is
 // required rather than requested: SYSVOL carries the policy that every
 // client in the domain enforces, so an unsigned session is a tampering
 // position, and a library that negotiates it away leaves no trace in the
 // result. It is a package-level value, not a per-call option, so there is
 // no code path that can dial without it.
+//
+// SpecifiedDialect is deliberately left zero, which offers CloudSoda's full
+// list from SMB 3.1.1 down. Pinning a dialect is the only way to lose SMB3
+// encryption, so not pinning one is how "prefer encryption" is expressed;
+// the DC's encryption-required session flag then applies (SPIKE-T00 §4).
 //
 // This states what the CLIENT demands. Whether the SERVER also requires it
 // cannot be read back from the public CloudSoda API (SPIKE-T00 §4), so
@@ -57,6 +64,10 @@ var negotiator = smb2.Negotiator{RequireMessageSigning: true}
 // case-insensitive on the wire, and ParseUNC canonicalises to upper case so
 // callers can compare without folding.
 const SysvolShare = "SYSVOL"
+
+// smbPort is the only port this package dials. SMB over NetBIOS (139) is
+// not offered: a DC that requires signing and SMB3 serves 445.
+const smbPort = "445"
 
 // UNC is a parsed gPCFileSysPath.
 //
@@ -79,6 +90,11 @@ type UNC struct {
 	Path string
 }
 
+// isSep reports whether r separates UNC components. gPCFileSysPath is
+// written by whatever tool created the GPO, so both spellings arrive, in
+// any mix, within one path.
+func isSep(r rune) bool { return r == '\\' || r == '/' }
+
 // ParseUNC splits a gPCFileSysPath into its domain, share and in-share
 // path.
 //
@@ -90,7 +106,44 @@ type UNC struct {
 // It returns ErrNotUNC, ErrNoDomain or ErrNoShare for input it cannot
 // split, and never panics regardless of input.
 func ParseUNC(uncPath string) (UNC, error) {
-	return UNC{}, errNotImplemented
+	r := []rune(uncPath)
+	if len(r) < 2 || !isSep(r[0]) || !isSep(r[1]) {
+		return UNC{}, fmt.Errorf("%w: %q", ErrNotUNC, uncPath)
+	}
+	rest := string(r[2:])
+
+	// Domain and share are split one separator at a time rather than by
+	// collapsing first: an empty component here is rejected, because
+	// guessing at it picks which domain to resolve or which tree to mount.
+	domain, after, hasShare := cutFunc(rest, isSep)
+	if domain == "" {
+		return UNC{}, fmt.Errorf("%w: %q", ErrNoDomain, uncPath)
+	}
+	if !hasShare {
+		return UNC{}, fmt.Errorf("%w: %q", ErrNoShare, uncPath)
+	}
+	share, tail, _ := cutFunc(after, isSep)
+	if share == "" {
+		return UNC{}, fmt.Errorf("%w: %q", ErrNoShare, uncPath)
+	}
+
+	// Only inside the share are repeated and trailing separators collapsed,
+	// which is what turns a wire path into an fs.FS path. FieldsFunc drops
+	// empty components, so "." is what remains of the share root.
+	path := strings.Join(strings.FieldsFunc(tail, isSep), "/")
+	if path == "" {
+		path = "."
+	}
+	return UNC{Domain: domain, Share: strings.ToUpper(share), Path: path}, nil
+}
+
+// cutFunc is strings.Cut with a rune predicate instead of a literal
+// separator, so a component can end at either spelling.
+func cutFunc(s string, sep func(rune) bool) (before, after string, found bool) {
+	if i := strings.IndexFunc(s, sep); i >= 0 {
+		return s[:i], s[i+1:], true
+	}
+	return s, "", false
 }
 
 // dialTarget reports the address to connect to and the service principal to
@@ -102,7 +155,8 @@ func ParseUNC(uncPath string) (UNC, error) {
 // is trusted to remember; the unit tests assert u.Domain reaches neither
 // return value.
 func dialTarget(dc string, u UNC) (addr, spn string) {
-	return "", ""
+	_ = u // present so the rule is visible at every call site, never read.
+	return net.JoinHostPort(dc, smbPort), "cifs/" + dc
 }
 
 // Config is what a Client needs to reach SYSVOL.
@@ -122,7 +176,13 @@ type Config struct {
 // A GPO walk touches one share hundreds of times, so an implementation is
 // expected to mount each share once and keep it for the session's life
 // rather than issuing a tree connect per file.
-type Client struct{}
+type Client struct {
+	dc      string
+	session *smb2.Session
+
+	mu     sync.Mutex
+	shares map[string]*smb2.Share
+}
 
 // Dial establishes an SMB session to cfg.DC authenticated by cfg.Krb.
 //
@@ -133,17 +193,97 @@ type Client struct{}
 // (SPIKE-T00 §4), so proving the server's posture belongs to V-03/dcverify,
 // not to a test here.
 func Dial(ctx context.Context, cfg Config) (*Client, error) {
-	return nil, errNotImplemented
+	if cfg.DC == "" {
+		return nil, errors.New("smbx: Config.DC is empty; the pinned domain controller is the only host this package dials")
+	}
+	if cfg.Krb == nil {
+		return nil, errors.New("smbx: Config.Krb is nil; the SMB session authenticates with the client from krb.Client.GSSAPIClient()")
+	}
+
+	// The UNC is zero because neither return value may depend on one: the
+	// address and the service ticket name the pinned DC, always.
+	addr, spn := dialTarget(cfg.DC, UNC{})
+	d := &smb2.Dialer{
+		Negotiator: negotiator,
+		Initiator:  &smb2.Krb5Initiator{Client: cfg.Krb, TargetSPN: spn},
+	}
+
+	// ctx covers the dial only. CloudSoda's session deliberately does not
+	// inherit it, and binding one would make Close fail for any caller
+	// whose context ends before its cleanup runs.
+	s, err := d.Dial(ctx, addr)
+	if err != nil {
+		return nil, fmt.Errorf("smbx: dialing %s as %s: %w", addr, spn, err)
+	}
+	return &Client{dc: cfg.DC, session: s, shares: map[string]*smb2.Share{}}, nil
 }
 
 // Close logs off the session and unmounts every cached share.
 func (c *Client) Close() error {
-	return errNotImplemented
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	var errs []error
+	for name, s := range c.shares {
+		if err := s.Umount(); err != nil {
+			errs = append(errs, fmt.Errorf("smbx: unmounting %s: %w", name, err))
+		}
+	}
+	clear(c.shares)
+	if err := c.session.Logoff(); err != nil {
+		errs = append(errs, fmt.Errorf("smbx: logging off from %s: %w", c.dc, err))
+	}
+	return errors.Join(errs...)
+}
+
+// resolve parses a full UNC path and returns the mounted share it names
+// together with the path within it.
+func (c *Client) resolve(uncPath string) (*smb2.Share, string, error) {
+	u, err := ParseUNC(uncPath)
+	if err != nil {
+		return nil, "", err
+	}
+	s, err := c.mount(u.Share)
+	if err != nil {
+		return nil, "", err
+	}
+	return s, u.Path, nil
+}
+
+// mount returns the cached tree connect for a share, making it on first
+// use. A GPO walk touches one share hundreds of times, so the connect is
+// kept for the session's life rather than repeated per file.
+//
+// The share is mounted on the pinned DC by name, not on the UNC's domain,
+// and not on the dialed address — a port in the mount path would reach the
+// server as part of the tree name.
+func (c *Client) mount(share string) (*smb2.Share, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if s, ok := c.shares[share]; ok {
+		return s, nil
+	}
+	name := `\\` + c.dc + `\` + share
+	s, err := c.session.Mount(name)
+	if err != nil {
+		return nil, fmt.Errorf("smbx: mounting %s: %w", name, err)
+	}
+	c.shares[share] = s
+	return s, nil
 }
 
 // Open opens the file named by a full UNC path.
 func (c *Client) Open(uncPath string) (fs.File, error) {
-	return nil, errNotImplemented
+	s, path, err := c.resolve(uncPath)
+	if err != nil {
+		return nil, err
+	}
+	f, err := s.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("smbx: opening %s: %w", uncPath, err)
+	}
+	return f, nil
 }
 
 // ReadDir lists the directory named by a full UNC path.
@@ -151,7 +291,15 @@ func (c *Client) Open(uncPath string) (fs.File, error) {
 // CloudSoda's Share.ReadDir answers []os.FileInfo, so this converts with
 // fs.FileInfoToDirEntry rather than inventing a DirEntry type.
 func (c *Client) ReadDir(uncPath string) ([]fs.DirEntry, error) {
-	return nil, errNotImplemented
+	s, path, err := c.resolve(uncPath)
+	if err != nil {
+		return nil, err
+	}
+	infos, err := s.ReadDir(path)
+	if err != nil {
+		return nil, fmt.Errorf("smbx: listing %s: %w", uncPath, err)
+	}
+	return dirEntries(infos), nil
 }
 
 // FS returns the subtree at a full UNC path as an fs.FS rooted there, which
@@ -167,7 +315,11 @@ func (c *Client) ReadDir(uncPath string) ([]fs.DirEntry, error) {
 // then fail against a real DC. readDirFS closes that gap, and the unit
 // tests pin it.
 func (c *Client) FS(uncPath string) (fs.FS, error) {
-	return nil, errNotImplemented
+	s, path, err := c.resolve(uncPath)
+	if err != nil {
+		return nil, err
+	}
+	return readDirFS{inner: s.DirFS(path)}, nil
 }
 
 // readDirFS adapts an fs.FS whose directories are readable only through
@@ -184,10 +336,43 @@ type readDirFS struct {
 // Compile-time proof of the property the whole wrapper exists for.
 var _ fs.ReadDirFS = readDirFS{}
 
+// osStyleDir is the directory shape CloudSoda hands back in place of
+// fs.ReadDirFile.
+type osStyleDir interface {
+	Readdir(n int) ([]os.FileInfo, error)
+}
+
 func (f readDirFS) Open(name string) (fs.File, error) {
-	return nil, errNotImplemented
+	return f.inner.Open(name)
 }
 
 func (f readDirFS) ReadDir(name string) ([]fs.DirEntry, error) {
-	return nil, errNotImplemented
+	d, err := f.inner.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = d.Close() }()
+
+	dir, ok := d.(osStyleDir)
+	if !ok {
+		return nil, &fs.PathError{Op: "readdir", Path: name, Err: errors.New("smbx: not a directory this FS can enumerate")}
+	}
+	// -1 asks for every entry in one call, which is the only form that
+	// reports the end of the listing as nil rather than io.EOF.
+	infos, err := dir.Readdir(-1)
+	if err != nil {
+		return nil, &fs.PathError{Op: "readdir", Path: name, Err: err}
+	}
+	return dirEntries(infos), nil
+}
+
+// dirEntries converts and sorts by name, which fs.ReadDirFS requires and
+// fs.WalkDir relies on for a deterministic walk.
+func dirEntries(infos []os.FileInfo) []fs.DirEntry {
+	ents := make([]fs.DirEntry, len(infos))
+	for i, fi := range infos {
+		ents[i] = fs.FileInfoToDirEntry(fi)
+	}
+	sort.Slice(ents, func(i, j int) bool { return ents[i].Name() < ents[j].Name() })
+	return ents
 }
