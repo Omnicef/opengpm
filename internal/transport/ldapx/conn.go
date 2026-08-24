@@ -43,11 +43,22 @@ package ldapx
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
+	"fmt"
+	"io"
+	"net"
+	"os"
 
 	"github.com/go-ldap/ldap/v3"
+	"github.com/go-ldap/ldap/v3/gssapi"
 	"github.com/jcmturner/gokrb5/v8/client"
+	"github.com/jcmturner/gokrb5/v8/iana/flags"
 )
+
+// sdFlagsDACLOwnerGroup is the value of the LDAP_SERVER_SD_FLAGS_OID control SearchSD
+// sends: OWNER|GROUP|DACL, and deliberately not SACL(0x8).
+const sdFlagsDACLOwnerGroup = 0x1 | 0x2 | 0x4
 
 // The refusals a config can earn before anything is dialed. Dial validates
 // first and connects second: a config that cannot produce a verified,
@@ -133,18 +144,58 @@ type Conn struct {
 // The service principal to request is "ldap/<cfg.DC>": the pinned host,
 // never a domain name.
 func Dial(cfg Config) (*Conn, error) {
-	return nil, errors.New("ldapx: Dial: not implemented")
+	url, err := dialURL(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.Krb == nil && (cfg.BindDN == "" || cfg.Password == "") {
+		return nil, ErrNoCredentials
+	}
+	tc, err := tlsConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	l, err := ldap.DialURL(url, ldap.DialWithTLSConfig(tc))
+	if err != nil {
+		return nil, fmt.Errorf("ldapx: dial %s: %w", url, err)
+	}
+	if cfg.Krb != nil {
+		// No SASL security layer is negotiated or wanted; TLS is the
+		// channel. See the package comment.
+		//
+		// MUTUAL-REQUIRED is not an option, it is the protocol: RFC 4752
+		// runs three legs, and the second is the AP-REP the server only
+		// sends when the AP-REQ asks for one. gokrb5 leaves ap-options
+		// empty, so without this AD answers the first token with "Invalid
+		// Credentials ... data 57" instead of a challenge.
+		err = l.GSSAPIBindRequestWithAPOptions(
+			&gssapi.Client{Client: cfg.Krb},
+			&ldap.GSSAPIBindRequest{ServicePrincipalName: "ldap/" + cfg.DC},
+			[]int{flags.APOptionMutualRequired},
+		)
+	} else {
+		err = l.Bind(cfg.BindDN, cfg.Password)
+	}
+	if err != nil {
+		_ = l.Close()
+		return nil, fmt.Errorf("ldapx: bind to %s: %w", cfg.DC, err)
+	}
+	return &Conn{dc: cfg.DC, conn: l}, nil
 }
 
 // DC reports the domain controller this Conn is bound to, so the SYSVOL
 // read (T-03) can mount the same replica (§4.1).
 func (c *Conn) DC() string {
-	return ""
+	return c.dc
 }
 
 // Close unbinds and closes the connection.
 func (c *Conn) Close() error {
-	return errors.New("ldapx: Close: not implemented")
+	if cl, ok := c.conn.(io.Closer); ok {
+		return cl.Close()
+	}
+	return nil
 }
 
 // SearchSD searches base with filter for attrs, requesting security
@@ -173,7 +224,19 @@ func (c *Conn) Close() error {
 //
 // ctx bounds the search.
 func (c *Conn) SearchSD(ctx context.Context, base, filter string, attrs []string) ([]*ldap.Entry, error) {
-	return nil, errors.New("ldapx: SearchSD: not implemented")
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	req := ldap.NewSearchRequest(
+		base, ldap.ScopeWholeSubtree, ldap.NeverDerefAliases, 0, 0, false,
+		filter, attrs,
+		[]ldap.Control{&ldap.ControlMicrosoftSDFlags{ControlValue: sdFlagsDACLOwnerGroup}},
+	)
+	res, err := c.conn.Search(req)
+	if err != nil {
+		return nil, fmt.Errorf("ldapx: search %s: %w", base, err)
+	}
+	return res.Entries, nil
 }
 
 // dialURL reports the URL Dial connects to, pinned to cfg.DC.
@@ -182,7 +245,10 @@ func (c *Conn) SearchSD(ctx context.Context, base, filter string, attrs []string
 // plaintext port; the host is written by net.JoinHostPort so that a literal
 // IPv6 DC is bracketed. It returns ErrNoDC for an empty host.
 func dialURL(cfg Config) (string, error) {
-	return "", errors.New("ldapx: dialURL: not implemented")
+	if cfg.DC == "" {
+		return "", ErrNoDC
+	}
+	return "ldaps://" + net.JoinHostPort(cfg.DC, "636"), nil
 }
 
 // tlsConfig builds the TLS configuration Dial connects with, from the PEM
@@ -199,5 +265,20 @@ func dialURL(cfg Config) (string, error) {
 // path for a bundle that cannot be read or holds no certificate. An
 // unreadable bundle must never degrade into an empty pool.
 func tlsConfig(cfg Config) (*tls.Config, error) {
-	return nil, errors.New("ldapx: tlsConfig: not implemented")
+	if cfg.CACert == "" {
+		return nil, ErrPlaintext
+	}
+	bundle, err := os.ReadFile(cfg.CACert) // #nosec G304 -- the operator names the bundle to trust; that is the point of the field.
+	if err != nil {
+		return nil, fmt.Errorf("ldapx: read CA bundle: %w", err)
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(bundle) {
+		return nil, fmt.Errorf("ldapx: CA bundle %s holds no certificate", cfg.CACert)
+	}
+	return &tls.Config{
+		RootCAs:    roots,
+		ServerName: cfg.DC,
+		MinVersion: tls.VersionTLS12,
+	}, nil
 }
