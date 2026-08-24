@@ -18,6 +18,12 @@ import (
 //     a domain controller, and §4.1 requires LDAP and SMB to read the same
 //     replica — reusing the variable is the pinning requirement expressed
 //     as configuration, exactly as smbx does.
+//   - OPENGPM_TEST_CACERT is the PEM bundle that verifies the DC's LDAPS
+//     certificate. It is required, not optional: this package has no
+//     cleartext path and does not skip verification, so without a bundle
+//     there is no connection to make and nothing to test. A lab whose DC
+//     serves a self-signed LDAPS certificate points this at that
+//     certificate; one behind an enterprise CA points it at the chain.
 //   - OPENGPM_TEST_BASEDN overrides the base DN. Without it the realm is
 //     converted the obvious way, GPLAB.LOCAL to DC=gplab,DC=local, which is
 //     right for every domain whose DN follows its DNS name.
@@ -31,13 +37,14 @@ const (
 	envPrincipal = "OPENGPM_TEST_PRINCIPAL"
 	envRealm     = "OPENGPM_TEST_REALM"
 	envKDC       = "OPENGPM_TEST_KDC"
+	envCACert    = "OPENGPM_TEST_CACERT"
 	envKrb5Conf  = "KRB5_CONFIG"
 	envBaseDN    = "OPENGPM_TEST_BASEDN"
 )
 
 type testEnv struct {
-	keytab, principal, realm, kdc string
-	baseDN                        string
+	keytab, principal, realm, kdc, caCert string
+	baseDN                                string
 }
 
 // requireEnv skips unless the whole set is present. A half-configured
@@ -58,6 +65,7 @@ func requireEnv(t *testing.T) testEnv {
 		principal: get(envPrincipal),
 		realm:     get(envRealm),
 		kdc:       get(envKDC),
+		caCert:    get(envCACert),
 	}
 	get(envKrb5Conf)
 	if len(missing) > 0 {
@@ -86,9 +94,14 @@ func baseDNFromRealm(realm string) string {
 // krb (T-01), handed to ldapx as the bind's GSSAPI client. ldapx does no
 // Kerberos of its own, so a failure to get a TGT here is a T-01 failure.
 //
-// No TLS is configured, so this is the GSSAPI bind over port 389 that the
-// ticket describes: authenticated without a certificate. See the package
-// comment for why go-ldap cannot also seal that channel.
+// The connection is ldaps://<DC>:636, verified against the bundle at
+// OPENGPM_TEST_CACERT. GSSAPI supplies the identity and TLS supplies the
+// channel, because go-ldap negotiates no SASL security layer and so a
+// GSSAPI bind encrypts nothing (see the package comment). Verification is
+// real: nothing here or in the package sets InsecureSkipVerify, so a
+// handshake failure means the bundle is wrong or the certificate does not
+// carry the pinned name — OPENGPM_TEST_KDC has to be the name in the DC's
+// certificate. That is a lab to fix, not a check to switch off.
 func dial(t *testing.T) (testEnv, *ldapx.Conn) {
 	t.Helper()
 	e := requireEnv(t)
@@ -97,9 +110,9 @@ func dial(t *testing.T) (testEnv, *ldapx.Conn) {
 	if err != nil {
 		t.Fatalf("krb.FromKeytab(%s, %s, %s): %v", e.keytab, e.principal, e.realm, err)
 	}
-	c, err := ldapx.Dial(ldapx.Config{DC: e.kdc, Krb: k.GSSAPIClient()})
+	c, err := ldapx.Dial(ldapx.Config{DC: e.kdc, Krb: k.GSSAPIClient(), CACert: e.caCert})
 	if err != nil {
-		t.Fatalf("ldapx.Dial(%s): %v", e.kdc, err)
+		t.Fatalf("ldapx.Dial(%s, ca=%s): %v", e.kdc, e.caCert, err)
 	}
 	t.Cleanup(func() {
 		if err := c.Close(); err != nil {
@@ -170,10 +183,11 @@ func TestConnDCIsPinned(t *testing.T) {
 	}
 }
 
-// Deliberately not here: a live simple bind over LDAPS. It needs a
-// certificate and a CA bundle the lab may not have, while the part that can
-// go wrong without one — which URL, which bind, which refusal — is above
-// the socket and pinned by TestDialURL and TestDialRefuses in conn_test.go.
-// When the lab grows a cert, the live half belongs here: dial with
-// Config{DC, BindDN, Password, TLS} and run the same SearchSD assertion, so
-// that the fallback is proven to carry the SD flags control too.
+// Deliberately not here: a live simple bind. It needs the service account's
+// password in the environment, a secret this suite would rather not hold
+// for a path that shares its connection, its controls and its search with
+// the GSSAPI one — everything below the bind is already covered above. The
+// selection logic is pinned without a socket by conn_test.go. If the
+// fallback ever earns a live test it belongs here: dial with Config{DC,
+// BindDN, Password, CACert} and run the same SearchSD assertion, proving
+// the fallback carries the SD flags control too.

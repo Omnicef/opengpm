@@ -1,23 +1,35 @@
 package ldapx
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"errors"
+	"math/big"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-ldap/ldap/v3"
 	"github.com/jcmturner/gokrb5/v8/client"
 )
 
 // Nothing about a real domain is committed. .test is reserved by RFC 6761
-// and cannot resolve, which matters for TestDialRefuses: those configs must
+// and cannot resolve, which matters for the Dial tests: those configs must
 // be rejected before anything is dialed, so a case that reached the network
 // would hang rather than quietly pass.
 const (
-	testDC     = "dc01.example.test"
-	testBaseDN = "CN=Policies,CN=System,DC=example,DC=test"
-	testFilter = "(objectClass=groupPolicyContainer)"
-	svcDN      = "CN=svc-opengpm,CN=Users,DC=example,DC=test"
+	testDC       = "dc01.example.test"
+	testBaseDN   = "CN=Policies,CN=System,DC=example,DC=test"
+	testFilter   = "(objectClass=groupPolicyContainer)"
+	svcDN        = "CN=svc-opengpm,CN=Users,DC=example,DC=test"
+	testPassword = "hunter2"
 )
 
 // kerberosClient stands in for the client krb.Client.GSSAPIClient() hands
@@ -127,9 +139,13 @@ func TestSearchSDPassesTheSearchThrough(t *testing.T) {
 	}
 }
 
+// The URL is always LDAPS on 636, pinned to the configured host. There is
+// no scheme to select and no plaintext port to fall back to, so what is
+// left to get wrong is the host: a domain name here, or a hand-built
+// "host:port" that mangles a literal IPv6 address, and the connection is no
+// longer pinned to the replica §4.1 chose.
 func TestDialURL(t *testing.T) {
-	simple := Config{DC: testDC, BindDN: svcDN, Password: "hunter2"}
-	tlsConf := &tls.Config{MinVersion: tls.VersionTLS12}
+	ca := writeCABundle(t)
 
 	tests := []struct {
 		name string
@@ -138,43 +154,29 @@ func TestDialURL(t *testing.T) {
 		err  error
 	}{
 		{
-			// The GSSAPI bind carries no secret, so port 389 is permitted;
-			// see the package comment on why go-ldap cannot seal it.
-			"gssapi without TLS is ldap://:389",
-			Config{DC: testDC, Krb: &kerberosClient},
-			"ldap://" + testDC + ":389",
-			nil,
-		},
-		{
-			"gssapi with TLS is ldaps://:636",
-			Config{DC: testDC, Krb: &kerberosClient, TLS: tlsConf},
+			"gssapi bind",
+			Config{DC: testDC, Krb: &kerberosClient, CACert: ca},
 			"ldaps://" + testDC + ":636",
 			nil,
 		},
 		{
-			"simple bind with TLS is the documented fallback",
-			Config{DC: testDC, BindDN: svcDN, Password: "hunter2", TLS: tlsConf},
+			"simple bind fallback uses the same URL",
+			Config{DC: testDC, BindDN: svcDN, Password: testPassword, CACert: ca},
 			"ldaps://" + testDC + ":636",
 			nil,
 		},
 		{
-			// A literal address is bracketed, which is what
-			// net.JoinHostPort is for and what hand-built "host:port"
-			// concatenation gets wrong.
+			// net.JoinHostPort brackets a literal address; string
+			// concatenation does not, and the result parses as a different
+			// host entirely.
 			"IPv6 DC is bracketed",
-			Config{DC: "2001:db8::1", Krb: &kerberosClient},
-			"ldap://[2001:db8::1]:389",
+			Config{DC: "2001:db8::1", Krb: &kerberosClient, CACert: ca},
+			"ldaps://[2001:db8::1]:636",
 			nil,
-		},
-		{
-			"simple bind without TLS is refused",
-			simple,
-			"",
-			ErrPlaintext,
 		},
 		{
 			"no DC is refused",
-			Config{Krb: &kerberosClient},
+			Config{Krb: &kerberosClient, CACert: ca},
 			"",
 			ErrNoDC,
 		},
@@ -192,36 +194,66 @@ func TestDialURL(t *testing.T) {
 	}
 }
 
-// Dial refuses before it dials. Every case here names a host that cannot
-// resolve, so an implementation that validated after connecting would fail
-// this rather than pass it slowly.
+// TestDialRefusesPlaintext is the design change this package is built
+// around: TLS is not preferred, it is the only thing there is.
+//
+// Both binds are listed because the GSSAPI one is the case that looks safe
+// and is not. go-ldap negotiates no SASL security layer, so a GSSAPI bind
+// authenticates and encrypts nothing — every GPO, ACL and security filter
+// this tool reads would cross the network in the clear, which is precisely
+// the disclosure PLAN §5 refuses. A config with no CA bundle names no
+// connection this package is willing to open, whichever credential it
+// carries.
+func TestDialRefusesPlaintext(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		cfg  Config
+	}{
+		{
+			"gssapi without TLS",
+			Config{DC: testDC, Krb: &kerberosClient},
+		},
+		{
+			"simple bind without TLS",
+			Config{DC: testDC, BindDN: svcDN, Password: testPassword},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			c, err := Dial(tt.cfg)
+			if !errors.Is(err, ErrPlaintext) {
+				t.Fatalf("Dial error = %v, want %v", err, ErrPlaintext)
+			}
+			if c != nil {
+				t.Errorf("Dial returned a Conn alongside an error")
+			}
+		})
+	}
+}
+
+// The rest of what Dial refuses before it dials. Every case here names a
+// host that cannot resolve, so an implementation that validated after
+// connecting would fail this rather than pass it slowly.
 func TestDialRefuses(t *testing.T) {
+	ca := writeCABundle(t)
+
 	tests := []struct {
 		name string
 		cfg  Config
 		want error
 	}{
 		{
-			// PLAN §5: "never baked into the image" is about storage, this
-			// is about the wire. A simple bind over 389 hands the service
-			// account's password to anyone on the path.
-			"simple bind without TLS",
-			Config{DC: testDC, BindDN: svcDN, Password: "hunter2"},
-			ErrPlaintext,
-		},
-		{
 			"no credentials at all",
-			Config{DC: testDC},
+			Config{DC: testDC, CACert: ca},
 			ErrNoCredentials,
 		},
 		{
 			"password without a DN is not a credential",
-			Config{DC: testDC, Password: "hunter2", TLS: &tls.Config{MinVersion: tls.VersionTLS12}},
+			Config{DC: testDC, Password: testPassword, CACert: ca},
 			ErrNoCredentials,
 		},
 		{
 			"no DC",
-			Config{Krb: &kerberosClient},
+			Config{Krb: &kerberosClient, CACert: ca},
 			ErrNoDC,
 		},
 	}
@@ -238,11 +270,121 @@ func TestDialRefuses(t *testing.T) {
 	}
 }
 
-// A live LDAPS simple bind is deliberately not tested. It needs a
-// certificate the lab may not have, and the selection logic — which URL,
-// which bind, which refusal — is entirely above the socket and pinned by
-// TestDialURL and TestDialRefuses. The live half would go in
-// integration_test.go beside TestSDFlagsControl.
+// The verification posture, pinned field by field.
+//
+// This is the one that stops the lab shortcut from shipping. Every failure
+// to connect to a domain controller over LDAPS looks like a certificate
+// problem, and the fix that always works is InsecureSkipVerify — at which
+// point the connection is encrypted against whoever answered, the CA bundle
+// §5 asks for is decorative, and nothing else in this package notices.
+func TestTLSConfig(t *testing.T) {
+	ca := writeCABundle(t)
+
+	got, err := tlsConfig(Config{DC: testDC, Krb: &kerberosClient, CACert: ca})
+	if err != nil {
+		t.Fatalf("tlsConfig: %v", err)
+	}
+	if got.InsecureSkipVerify {
+		t.Error("InsecureSkipVerify is set; the CA bundle is then decorative and the connection is encrypted to whoever answered")
+	}
+	if got.RootCAs == nil {
+		t.Error("RootCAs is nil, so the bundle at Config.CACert was never loaded and the host roots are trusted instead")
+	}
+	// The certificate has to be checked against the host that was pinned,
+	// not against whatever name the dialer happened to derive.
+	if got.ServerName != testDC {
+		t.Errorf("ServerName = %q, want %q", got.ServerName, testDC)
+	}
+	if got.MinVersion < tls.VersionTLS12 {
+		t.Errorf("MinVersion = 0x%x, want at least TLS 1.2 (0x%x)", got.MinVersion, tls.VersionTLS12)
+	}
+}
+
+// A bundle that is not there, or is not a bundle, is an error naming the
+// path. The failure mode this guards is quieter than it looks: ignoring the
+// read leaves an empty pool, which trusts nothing, which surfaces one
+// handshake later as an unrelated certificate error.
+func TestTLSConfigRejectsUnusableBundle(t *testing.T) {
+	junk := filepath.Join(t.TempDir(), "junk.pem")
+	if err := os.WriteFile(junk, []byte("this is not a certificate\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tt := range []struct {
+		name string
+		cfg  Config
+		want error
+	}{
+		{
+			"no bundle at all",
+			Config{DC: testDC, Krb: &kerberosClient},
+			ErrPlaintext,
+		},
+		{
+			"bundle that does not exist",
+			Config{DC: testDC, Krb: &kerberosClient, CACert: filepath.Join(t.TempDir(), "absent.pem")},
+			nil,
+		},
+		{
+			"bundle holding no certificate",
+			Config{DC: testDC, Krb: &kerberosClient, CACert: junk},
+			nil,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := tlsConfig(tt.cfg)
+			if err == nil {
+				t.Fatalf("tlsConfig = %+v, want an error", got)
+			}
+			if tt.want != nil && !errors.Is(err, tt.want) {
+				t.Fatalf("tlsConfig error = %v, want %v", err, tt.want)
+			}
+			if tt.cfg.CACert != "" && !strings.Contains(err.Error(), tt.cfg.CACert) {
+				t.Errorf("tlsConfig error = %v, want it to name %s", err, tt.cfg.CACert)
+			}
+		})
+	}
+}
+
+// writeCABundle writes a PEM file holding one self-signed CA certificate
+// and returns its path.
+//
+// It is generated rather than committed because none of these tests
+// handshake with anything: what is being pinned is that the bundle is
+// loaded and verification is left on, so any certificate that parses will
+// do, and a checked-in one would only acquire an expiry date.
+func writeCABundle(t *testing.T) string {
+	t.Helper()
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "opengpm test CA"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	path := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// A live LDAPS simple bind is deliberately not tested here. The selection
+// logic — which URL, which bind, which refusal, which verification posture
+// — is entirely above the socket and pinned by the tests above. The live
+// half would go in integration_test.go beside TestSDFlagsControl.
 
 // sdFlags decodes the flags integer out of an SD flags control, all the way
 // from the control's own encoding.
