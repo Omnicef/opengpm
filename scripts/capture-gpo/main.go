@@ -23,6 +23,15 @@
 // "the DC sent nothing" and "the DC sent an empty value" are different
 // facts and D-02 should be able to tell them apart.
 //
+// The one exception to "capture everything" is a mechanical name filter:
+// entries whose displayName begins with "oracle-gplink-" are skipped. Those
+// GPOs are O-03's scaffolding — capture-gplink.ps1 deletes and recreates
+// them on every run, so their cn (the GPO's {GUID}) and objectGUID change
+// each time and the fixture would churn for a reason that has nothing to do
+// with D-02. The filter reads one attribute as a string prefix and does not
+// look at what any entry contains, so it is not a second implementation of
+// the parser.
+//
 // It runs against the same environment as the ldapx integration test, and
 // builds the same stack the product does: one keytab, one TGT from krb, an
 // LDAPS bind through ldapx, and SearchSD so the LDAP_SERVER_SD_FLAGS_OID
@@ -57,6 +66,13 @@ import (
 // outPath is relative to the repository root, which is where `go run
 // ./scripts/capture-gpo` is run from.
 const outPath = "testdata/ldap/gpo_entries.json"
+
+// oracleGPLinkPrefix names the GPOs capture-gplink.ps1 creates and destroys
+// on every O-03 run (scripts/README-oracles.md). They are ephemeral by
+// design and belong to a different ticket's oracle, so they are kept out of
+// this fixture. Matching on the name is deliberate: it is the only stable
+// thing about them.
+const oracleGPLinkPrefix = "oracle-gplink-"
 
 // attrs is PLAN §4.1's table of groupPolicyContainer attributes, plus
 // objectGUID. Asking for a fixed list rather than for everything keeps the
@@ -133,6 +149,11 @@ func run() error {
 
 	entries := make([]entry, 0, len(found))
 	for _, ent := range found {
+		if strings.HasPrefix(ent.GetAttributeValue("displayName"), oracleGPLinkPrefix) {
+			fmt.Printf("skipping %s  displayName=%q  (O-03 scaffolding)\n",
+				ent.GetAttributeValue("cn"), ent.GetAttributeValue("displayName"))
+			continue
+		}
 		entries = append(entries, record(ent))
 	}
 	// Sorted by cn — the GPO's {GUID} — so re-running produces the same
